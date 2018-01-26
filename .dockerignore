@@ -1,0 +1,7 @@
+.vscode/
+tmp/
+vendor/
+tmp/
+debug
+cadrspace_status_client
+cadrspace_status_server
