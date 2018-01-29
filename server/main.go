@@ -1,86 +1,14 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"log"
-	"net"
 	"net/http"
+	"net/url"
 	"time"
 )
-
-func handleServer(conn net.Conn, requests chan []byte, responses chan []byte) {
-	notify := make(chan error)
-	defer conn.Close()
-
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-
-			n, err := conn.Read(buf)
-			if err != nil {
-				notify <- err
-				return
-			}
-			if n > 0 {
-				req := make([]byte, n)
-				copy(req, buf[:n])
-				requests <- req
-			}
-		}
-	}()
-
-	for {
-		select {
-		case err := <-notify:
-			if io.EOF == err {
-				close(notify)
-				return
-			}
-			log.Panic(err)
-		case res := <-responses:
-			conn.Write(res)
-		}
-	}
-
-}
-
-func handleTunnel(conn net.Conn, requests chan []byte, responses chan []byte) {
-	defer conn.Close()
-	notify := make(chan error)
-
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-
-			n, err := conn.Read(buf)
-			if err != nil {
-				notify <- err
-				return
-			}
-			if n > 0 {
-				res := make([]byte, n)
-				copy(res, buf[:n])
-				responses <- res
-			}
-		}
-	}()
-
-	for {
-		select {
-		case err := <-notify:
-			if io.EOF == err {
-				close(notify)
-				return
-			}
-			log.Panic(err)
-		case r := <-requests:
-			io.Copy(conn, bytes.NewBuffer(r))
-		}
-	}
-}
 
 type status struct {
 	Error     string `json:"error,omitempty"`
@@ -160,6 +88,10 @@ var statusTemplate = `{
 }
 `
 
+const (
+	statusAPIPort = "2000"
+)
+
 var zone, _ = time.LoadLocation("Europe/Moscow")
 
 func statusAPI(s *status, w http.ResponseWriter, r *http.Request) {
@@ -194,62 +126,40 @@ func statusAPI(s *status, w http.ResponseWriter, r *http.Request) {
 		w.Write(json)
 
 	case "POST":
-		s.Response = "OK"
-		s.UpdatedAt = time.Now().In(zone).Format(time.RFC3339)
-		json, _ := json.Marshal(s)
-		w.WriteHeader(http.StatusOK)
-		w.Write(json)
+
+		body, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		values, err := url.ParseQuery(string(body))
+		if err != nil {
+			log.Println(err)
+		}
+
+		if values.Get("open") == "true" {
+
+			s.Response = "OK"
+			s.UpdatedAt = time.Now().In(zone).Format(time.RFC3339)
+			json, err := json.Marshal(s)
+			if err != nil {
+				log.Println(err)
+			}
+			w.WriteHeader(http.StatusOK)
+			w.Write(json)
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+		}
 	}
 }
 
-const (
-	statusAPIPort = "2000"
-	tunnelPort    = "3000"
-	serverPort    = "4000"
-)
-
 func main() {
-
-	requests := make(chan []byte)
-	responses := make(chan []byte)
 	status := &status{}
 
 	fmt.Println("Starting HTTP status api...")
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		statusAPI(status, w, r)
 	})
-	go http.ListenAndServe(":"+statusAPIPort, nil)
-
-	fmt.Println("Starting TCP server...")
-	server, err := net.Listen("tcp", ":"+serverPort)
-	if err != nil {
-		log.Panic(err)
-	}
-	defer server.Close()
-
-	go func() {
-		for {
-			conn, err := server.Accept()
-			if err != nil {
-				log.Panic(err)
-			}
-			go handleServer(conn, requests, responses)
-		}
-	}()
-
-	fmt.Println("Starting TCP tunnel...")
-	tunnel, err := net.Listen("tcp", ":"+tunnelPort)
-	if err != nil {
-		log.Panic(err)
-	}
-	defer tunnel.Close()
-
-	for {
-		conn, err := tunnel.Accept()
-		if err != nil {
-			log.Panic(err)
-		}
-
-		go handleTunnel(conn, requests, responses)
-	}
+	http.ListenAndServe(":"+statusAPIPort, nil)
 }
